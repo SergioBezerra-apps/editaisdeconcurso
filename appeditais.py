@@ -1,19 +1,33 @@
 import streamlit as st
 import pdfplumber
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 from docx import Document
 import tempfile
 import os
+import tiktoken
 
-# Função para extrair texto do PDF
+# ────────────────────────────────────────────────────────────
+# CONFIGURAÇÕES GERAIS
+# ────────────────────────────────────────────────────────────
+MODEL_DEFAULT = "gpt-4o-mini"      # até 128k  tokens
+MODEL_FALLBACK = "gpt-4.1-mini"    # até 1M    tokens
+TOKEN_THRESHOLD = 120_000          # se ultrapassar → usa fallback
+
+# preços (USD por 1M tokens) – jun/2025
+PRICING = {
+    "gpt-4o-mini":   {"in": 0.15, "out": 0.60},
+    "gpt-4.1-mini":  {"in": 0.40, "out": 1.60},
+}
+
+# ────────────────────────────────────────────────────────────
+# FUNÇÕES AUXILIARES
+# ────────────────────────────────────────────────────────────
 def extract_text_from_pdf(file_path_or_file):
     text = ""
-    # Detecta se é caminho de arquivo (string) ou objeto file-like
     if isinstance(file_path_or_file, str):
         pdf_source = open(file_path_or_file, 'rb')
     else:
         pdf_source = file_path_or_file
-
     with pdfplumber.open(pdf_source) as pdf:
         for page in pdf.pages:
             page_text = page.extract_text()
@@ -23,7 +37,6 @@ def extract_text_from_pdf(file_path_or_file):
         pdf_source.close()
     return text
 
-# Função para preparar o prompt final
 def montar_prompt(prompt_base, esfera, edital_ok, edital_texto):
     prompt_usuario = (
         f"O edital a ser analisado é da esfera: {esfera}.\n"
@@ -34,54 +47,68 @@ def montar_prompt(prompt_base, esfera, edital_ok, edital_texto):
     )
     return prompt_base + "\n\n" + prompt_usuario
 
-# Função para chamar a OpenAI
-def analyze_edital_via_openai(prompt, openai_api_key, model="gpt-4o"):
-    client = OpenAI(api_key=openai_api_key)
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.0,
-        max_tokens=4096
-    )
-    return response.choices[0].message.content
+def count_tokens(text, model="gpt-4o-mini"):
+    enc = tiktoken.encoding_for_model(model)
+    return len(enc.encode(text))
 
-# Função para gerar o DOCX final (adapte para separar etapas se desejar)
+def choose_model(n_tokens):
+    return MODEL_DEFAULT if n_tokens <= TOKEN_THRESHOLD else MODEL_FALLBACK
+
+def estimate_cost(model, prompt_tokens, completion_tokens):
+    price_in  = PRICING[model]["in"]  * (prompt_tokens     / 1_000_000)
+    price_out = PRICING[model]["out"] * (completion_tokens / 1_000_000)
+    return round(price_in + price_out, 4)
+
+# │ OpenAI chamada síncrona, com stream=True para latência percebida menor
+def call_openai_stream(prompt, model, api_key):
+    client = OpenAI(api_key=api_key)
+    stream = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0,
+        stream=True          # ← STREAMING
+    )
+    collected_chunks = []
+    collected_text = ""
+    for chunk in stream:
+        chunk_text = chunk.choices[0].delta.content or ""
+        collected_text += chunk_text
+        collected_chunks.append(chunk)
+        # imprime enquanto recebe
+        st.write(chunk_text, end="")  # mostra incrementalmente
+    # usage só aparece no último chunk
+    usage = collected_chunks[-1].usage
+    return collected_text, usage
+
 def generate_docx_from_template(template_path, output_path, resposta_llm):
     doc = Document(template_path)
-    # Substitui os marcadores de etapas pelo texto do relatório completo (ou adapte para separar as etapas)
     for p in doc.paragraphs:
         if "Reproduzir integralmente resultado da etapa" in p.text:
             p.text = resposta_llm
     doc.save(output_path)
 
-# Controle de estado da conversa
-if 'step' not in st.session_state:
-    st.session_state.step = 0
-if 'esfera' not in st.session_state:
-    st.session_state.esfera = None
-if 'edital_ok' not in st.session_state:
-    st.session_state.edital_ok = None
-if 'edital_file' not in st.session_state:
-    st.session_state.edital_file = None
-if 'analise_pronta' not in st.session_state:
-    st.session_state.analise_pronta = False
-if 'llm_resposta' not in st.session_state:
-    st.session_state.llm_resposta = None
+# ────────────────────────────────────────────────────────────
+# ESTADO DA CONVERSA
+# ────────────────────────────────────────────────────────────
+for key, default in {
+    "step": 0, "esfera": None, "edital_ok": None,
+    "edital_file": None, "analise_pronta": False,
+    "llm_resposta": None, "usage": None, "modelo_usado": None
+}.items():
+    st.session_state.setdefault(key, default)
 
-st.title("Chatbot Interativo - Análise de Editais 3ª CAP/TCE-RJ")
-st.info("Bem-vindo(a)! Responda às perguntas abaixo para iniciar a análise do edital.")
+st.title("Chatbot Interativo – Análise de Editais (3ª CAP / TCE-RJ)")
 
-# Passo 1: Perguntar esfera do edital
+# ────────────────────────────────────────────────────────────
+# ETAPAS DO CHATBOT
+# ────────────────────────────────────────────────────────────
 if st.session_state.step == 0:
-    esfera = st.radio("O edital a ser analisado é Estadual ou Municipal?", ["Estadual", "Municipal"])
+    esfera = st.radio("O edital a ser analisado é:", ["Estadual", "Municipal"])
     if st.button("Próximo"):
         st.session_state.esfera = esfera
         st.session_state.step = 1
         st.experimental_rerun()
 
-# Passo 2: Perguntar se edital está legível e completo
 elif st.session_state.step == 1:
     edital_ok = st.radio("O edital está legível e completo?", ["Sim", "Não"])
     if st.button("Próximo"):
@@ -89,21 +116,19 @@ elif st.session_state.step == 1:
         st.session_state.step = 2
         st.experimental_rerun()
 
-# Passo 3: Upload do edital
 elif st.session_state.step == 2:
     edital_file = st.file_uploader("Faça upload do edital em PDF", type=["pdf"])
     if edital_file:
         st.session_state.edital_file = edital_file
-        if st.button("Iniciar análise automática"):
+        if st.button("Iniciar análise"):
             st.session_state.step = 3
             st.experimental_rerun()
 
-# Passo 4: Realiza análise automática e exibe resultado/download
+# ── Passo 3: processamento
 elif st.session_state.step == 3 and not st.session_state.analise_pronta:
-    with st.spinner("Extraindo texto do edital e consultando o modelo..."):
-        # Lê prompt-base e template diretamente da pasta
-        prompt_base = extract_text_from_pdf("prompt_edital.pdf")
-        template_path = "padrao_instrucao_arq.docx"
+    with st.spinner("Processando… isso pode levar alguns minutos."):
+        prompt_base  = extract_text_from_pdf("prompt_edital.pdf")
+        template_doc = "padrao_instrucao_arq.docx"
         edital_texto = extract_text_from_pdf(st.session_state.edital_file)
 
         prompt_final = montar_prompt(
@@ -113,34 +138,59 @@ elif st.session_state.step == 3 and not st.session_state.analise_pronta:
             edital_texto
         )
 
-        resposta_llm = analyze_edital_via_openai(
-            prompt_final,
-            st.secrets["openai_api_key"],
-            model="gpt-4o"
+        n_tokens = count_tokens(prompt_final, model=MODEL_DEFAULT)
+        modelo   = choose_model(n_tokens)
+
+        st.info(f"Modelo selecionado: **{modelo}**  •  Tokens de entrada estimados: **{n_tokens:,}**")
+
+        resposta, usage = call_openai_stream(
+            prompt=prompt_final,
+            model=modelo,
+            api_key=st.secrets["openai_api_key"]
         )
-        st.session_state.llm_resposta = resposta_llm
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-            generate_docx_from_template(template_path, tmp.name, resposta_llm)
+            generate_docx_from_template(template_doc, tmp.name, resposta)
             tmp.seek(0)
             st.session_state.output_docx_path = tmp.name
 
-    st.session_state.analise_pronta = True
-    st.experimental_rerun()
+        st.session_state.llm_resposta = resposta
+        st.session_state.usage = usage
+        st.session_state.modelo_usado = modelo
+        st.session_state.analise_pronta = True
+        st.experimental_rerun()
 
+# ── Passo 4: resultados
 elif st.session_state.step == 3 and st.session_state.analise_pronta:
-    st.success("Análise concluída! Baixe a instrução padronizada ou visualize o relatório abaixo.")
+    usage = st.session_state.usage
+    modelo = st.session_state.modelo_usado
+    cost_est = estimate_cost(
+        modelo,
+        usage.prompt_tokens,
+        usage.completion_tokens
+    )
+
+    st.success("✅ Análise concluída!")
+    st.markdown(
+        f"""**Resumo de uso**  
+        • Modelo: `{modelo}`  
+        • Prompt tokens: `{usage.prompt_tokens}`  
+        • Completion tokens: `{usage.completion_tokens}`  
+        • **Custo estimado:** **${cost_est}**"""
+    )
+
     with open(st.session_state.output_docx_path, "rb") as f:
         st.download_button(
-            label="Baixar instrução padronizada (.docx)",
+            label="⬇️ Baixar instrução (.docx)",
             data=f,
-            file_name="instrução_padronizada.docx",
+            file_name="instrucao_padronizada.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
-    with st.expander("Ver texto completo da análise"):
+
+    with st.expander("📝 Ver texto completo da análise"):
         st.write(st.session_state.llm_resposta)
 
     if st.button("Nova análise"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
         st.experimental_rerun()
