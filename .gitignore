@@ -1,0 +1,4 @@
+# Evita que segredos e ambientes virtuais subam para o repo
+.streamlit/secrets.toml
+.venv/
+__pycache__/
