@@ -1,6 +1,7 @@
 import streamlit as st
 import pdfplumber
 from openai import OpenAI
+import openai
 from docx import Document
 import tempfile
 import tiktoken
@@ -155,9 +156,16 @@ elif st.session_state.step == 3 and not st.session_state.analise_pronta:
         st.info(f"Modelo selecionado: **{modelo_sel}** "
                 f"(tokens de entrada: {token_in:,})")
 
-        resposta, token_out = call_openai_stream(
-            prompt_final, modelo_sel, st.secrets["openai_api_key"]
-        )
+        try:
+            resposta, token_out = call_openai_stream(
+                prompt_final, modelo_sel, st.secrets["openai_api_key"]
+            )
+        except openai.OpenAIError as e:
+            st.error(f"Erro na API OpenAI: {e}")
+            st.stop()
+        except Exception as e:
+            st.error(f"Erro inesperado: {e}")
+            st.stop()
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
             generate_docx_from_template(
