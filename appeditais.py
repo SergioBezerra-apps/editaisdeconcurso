@@ -6,6 +6,9 @@ import tempfile
 import tiktoken
 import os
 
+# Diretório base do projeto para montar paths relativos
+BASE_DIR = os.path.dirname(__file__)
+
 # ──────────────────────────────────────
 # Configurações gerais
 # ──────────────────────────────────────
@@ -135,7 +138,9 @@ elif st.session_state.step == 2:
 # Passo 3 – processamento
 elif st.session_state.step == 3 and not st.session_state.analise_pronta:
     with st.spinner("Processando… isso pode levar alguns minutos."):
-        prompt_base  = extract_text_from_pdf("prompt_edital.pdf")
+        prompt_base  = extract_text_from_pdf(
+            os.path.join(BASE_DIR, "prompt_edital.pdf")
+        )
         edital_texto = extract_text_from_pdf(st.session_state.edital_file)
         prompt_final = montar_prompt(
             prompt_base,
@@ -155,8 +160,11 @@ elif st.session_state.step == 3 and not st.session_state.analise_pronta:
         )
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-            generate_docx_from_template("padrao_instrucao_arq.docx",
-                                        tmp.name, resposta)
+            generate_docx_from_template(
+                os.path.join(BASE_DIR, "padrao_instrucao_arq.docx"),
+                tmp.name,
+                resposta,
+            )
             tmp.seek(0)
             st.session_state.output_docx_path = tmp.name
 
