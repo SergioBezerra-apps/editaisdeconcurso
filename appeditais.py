@@ -7,6 +7,21 @@ import tempfile
 import tiktoken
 import os
 
+# ------------- rerun que funciona em qualquer versão -------------
+def safe_rerun():
+    """Força reload do script mesmo em versões antigas do Streamlit."""
+    if hasattr(st, "rerun"):
+        st.rerun()                       # >= 1.22
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()          # 1.18 – 1.21
+    else:
+        # versão muito antiga: volta ao início do script "na marra"
+        raise RuntimeError(
+            "Streamlit não suporta rerun nesta versão. "
+            "Atualize a lib ou use st.stop() como fallback."
+        )
+# -----------------------------------------------------------------
+
 # Diretório base do projeto para montar paths relativos
 BASE_DIR = os.path.dirname(__file__)
 
@@ -117,7 +132,7 @@ if st.session_state.step == 0:
     if st.button("Próximo"):
         st.session_state.esfera = esfera
         st.session_state.step = 1
-        st.experimental_rerun()
+        safe_rerun()
 
 # Passo 1 – legibilidade
 elif st.session_state.step == 1:
@@ -125,7 +140,7 @@ elif st.session_state.step == 1:
     if st.button("Próximo"):
         st.session_state.edital_ok = edital_ok
         st.session_state.step = 2
-        st.experimental_rerun()
+        safe_rerun()
 
 # Passo 2 – upload
 elif st.session_state.step == 2:
@@ -134,7 +149,7 @@ elif st.session_state.step == 2:
         st.session_state.edital_file = edital_file
         if st.button("Iniciar análise"):
             st.session_state.step = 3
-            st.experimental_rerun()
+            safe_rerun()
 
 # Passo 3 – processamento
 elif st.session_state.step == 3 and not st.session_state.analise_pronta:
@@ -182,7 +197,7 @@ elif st.session_state.step == 3 and not st.session_state.analise_pronta:
         st.session_state.token_out      = token_out
         st.session_state.modelo_usado   = modelo_sel
         st.session_state.analise_pronta = True
-        st.experimental_rerun()
+        safe_rerun()
 
 # Passo 4 – resultado
 elif st.session_state.step == 3 and st.session_state.analise_pronta:
@@ -215,4 +230,4 @@ elif st.session_state.step == 3 and st.session_state.analise_pronta:
     if st.button("Nova análise"):
         for k in list(st.session_state.keys()):
             st.session_state.pop(k)
-        st.experimental_rerun()
+        safe_rerun()
